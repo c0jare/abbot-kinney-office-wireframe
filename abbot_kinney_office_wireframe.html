@@ -18,6 +18,7 @@
     color: #2dd4bf; font-size: 10px; opacity: 0.4; letter-spacing: 1px;
     pointer-events: none; text-transform: uppercase;
   }
+  html.embed-mode #label, html.embed-mode #hint { display: none; }
 </style>
 </head>
 <body>
@@ -26,6 +27,11 @@
   <div id="hint">drag to orbit &middot; scroll to zoom</div>
 </div>
 
+<script>
+  if (new URLSearchParams(location.search).has('embed')) {
+    document.documentElement.classList.add('embed-mode');
+  }
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script>
