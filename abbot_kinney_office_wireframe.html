@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>920 Abbot Kinney — 3D Wireframe</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #05070a; overflow: hidden; font-family: 'Courier New', monospace; }
+  #canvas-wrap { position: relative; width: 100%; height: 100%; }
+  canvas { display: block; }
+  #label {
+    position: absolute; left: 24px; bottom: 20px;
+    color: #2dd4bf; letter-spacing: 2px; font-size: 12px;
+    opacity: 0.75; pointer-events: none; text-transform: uppercase;
+  }
+  #label .addr { color: #6ee7de; font-size: 11px; opacity: 0.6; display: block; margin-top: 4px; letter-spacing: 1px; }
+  #hint {
+    position: absolute; right: 24px; bottom: 20px;
+    color: #2dd4bf; font-size: 10px; opacity: 0.4; letter-spacing: 1px;
+    pointer-events: none; text-transform: uppercase;
+  }
+</style>
+</head>
+<body>
+<div id="canvas-wrap">
+  <div id="label">Office HQ<span class="addr">920 Abbot Kinney Blvd &middot; Venice, CA 90291</span></div>
+  <div id="hint">drag to orbit &middot; scroll to zoom</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+(function () {
+  var wrap = document.getElementById('canvas-wrap');
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x05070a);
+  scene.fog = new THREE.FogExp2(0x05070a, 0.02);
+
+  var camera = new THREE.PerspectiveCamera(40, wrap.clientWidth / wrap.clientHeight, 0.1, 200);
+  camera.position.set(14, 9.5, 16);
+
+  var renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  wrap.appendChild(renderer.domElement);
+
+  var controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.06;
+  controls.minDistance = 6;
+  controls.maxDistance = 48;
+  controls.maxPolarAngle = Math.PI * 0.49;
+  controls.target.set(0, 3.2, 0);
+
+  var LINE_STRUCT = 0x2dd4bf;  // cyan — used everywhere; opacity still varies to keep layers legible
+  var LINE_TRIM = 0x2dd4bf;
+  var LINE_SOFT = 0x2dd4bf;
+
+  var building = new THREE.Group();
+  scene.add(building);
+
+  // ---------------- primitive helpers ----------------
+  function edgesFromGeometry(geo, color, opacity) {
+    var eg = new THREE.EdgesGeometry(geo, 12);
+    var mat = new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: opacity === undefined ? 0.9 : opacity });
+    return new THREE.LineSegments(eg, mat);
+  }
+  function addBox(w, h, d, x, y, z, color, opacity) {
+    var m = edgesFromGeometry(new THREE.BoxGeometry(w, h, d), color, opacity);
+    m.position.set(x, y, z);
+    building.add(m);
+    return m;
+  }
+  function addCyl(r, h, x, y, z, color, opacity) {
+    var m = edgesFromGeometry(new THREE.CylinderGeometry(r, r, h, 12), color, opacity);
+    m.position.set(x, y, z);
+    building.add(m);
+    return m;
+  }
+  function addCone(r, h, x, y, z, color, opacity, seg) {
+    var m = edgesFromGeometry(new THREE.ConeGeometry(r, h, seg || 8), color, opacity);
+    m.position.set(x, y, z);
+    building.add(m);
+    return m;
+  }
+  // flat disc / fan -> EdgesGeometry drops the coplanar radial spokes, leaving just the boundary arc + chord
+  // rotateSide: pass true for windows on a side (X-facing) wall so the fan turns to face outward correctly
+  function addFan(radius, thetaLength, x, y, z, color, opacity, rotateSide) {
+    var geo = new THREE.CircleGeometry(radius, 20, 0, thetaLength === undefined ? Math.PI * 2 : thetaLength);
+    if (rotateSide) geo.rotateY(Math.PI / 2);
+    var m = edgesFromGeometry(geo, color, opacity);
+    m.position.set(x, y, z);
+    building.add(m);
+    return m;
+  }
+  // a beam/strut running between two arbitrary points — used for raking trim and corbel brackets
+  function addBeam(p1, p2, thick, color, opacity) {
+    var start = new THREE.Vector3(p1[0], p1[1], p1[2]);
+    var end = new THREE.Vector3(p2[0], p2[1], p2[2]);
+    var dir = new THREE.Vector3().subVectors(end, start);
+    var len = dir.length();
+    if (len < 1e-6) return null;
+    var m = edgesFromGeometry(new THREE.BoxGeometry(len, thick, thick), color, opacity);
+    m.position.copy(start).addScaledVector(dir, 0.5);
+    var axis = new THREE.Vector3(1, 0, 0);
+    var ndir = dir.clone().normalize();
+    m.quaternion.setFromUnitVectors(axis, ndir);
+    building.add(m);
+    return m;
+  }
+  // a window with a proper molded surround: frame, lintel cap, sill, muntin cross
+  function addWindow(w, h, x, y, z, axis, color, opacity) {
+    var thick = 0.045;
+    var wDim = axis === 'x' ? [w, h, thick] : [thick, h, w];
+    var lintelDim = axis === 'x' ? [w + 0.18, 0.09, thick + 0.03] : [thick + 0.03, 0.09, w + 0.18];
+    var sillDim = axis === 'x' ? [w + 0.26, 0.07, thick + 0.06] : [thick + 0.06, 0.07, w + 0.26];
+    addBox(wDim[0], wDim[1], wDim[2], x, y, z, color, opacity);
+    addBox(lintelDim[0], lintelDim[1], lintelDim[2], x, y + h / 2 + 0.07, z, LINE_TRIM, Math.min(0.85, opacity + 0.1));
+    addBox(sillDim[0], sillDim[1], sillDim[2], x, y - h / 2 - 0.06, z, LINE_TRIM, Math.min(0.85, opacity + 0.1));
+    var mw = axis === 'x' ? w : 0.02, md = axis === 'x' ? 0.02 : w;
+    addBox(mw, 0.02, md, x, y, z, color, opacity * 0.6);
+    addBox(0.02, h, 0.02, x, y, z, color, opacity * 0.6);
+  }
+  // an arched-top window: rectangular sash below, semicircular arch above, with a molded surround
+  function addArchWindow(w, straightH, x, yBottom, z, axis, color, opacity) {
+    var thick = 0.045, r = w / 2;
+    var bodyCy = yBottom + straightH / 2;
+    var archCy = yBottom + straightH;
+    var rotate = axis === 'z';
+    var bodyDim = axis === 'x' ? [w, straightH, thick] : [thick, straightH, w];
+    var mullionDim = axis === 'x' ? [0.02, straightH, thick] : [thick, straightH, 0.02];
+    var sillDim = axis === 'x' ? [w + 0.16, 0.07, thick + 0.03] : [thick + 0.03, 0.07, w + 0.16];
+    addBox(bodyDim[0], bodyDim[1], bodyDim[2], x, bodyCy, z, color, opacity);
+    addBox(mullionDim[0], mullionDim[1], mullionDim[2], x, bodyCy, z, color, opacity * 0.6);
+    addBox(sillDim[0], sillDim[1], sillDim[2], x, yBottom - 0.05, z, LINE_TRIM, 0.65);
+    addFan(r, Math.PI, x, archCy, z, color, opacity, rotate);
+    addFan(r + 0.07, Math.PI, x, archCy, z, LINE_TRIM, Math.min(0.85, opacity + 0.15), rotate);
+    return archCy + r;
+  }
+
+  // hip roof over a rectangular footprint (ridge runs along the LONGER axis)
+  function makeHipRoofGeometry(w, d, h) {
+    var longZ = d >= w;
+    var rise = longZ ? (d - w) / 2 : (w - d) / 2;
+    var A, B, C, D_, R1, R2;
+    if (longZ) {
+      A = [-w / 2, 0, -d / 2]; B = [w / 2, 0, -d / 2];
+      C = [w / 2, 0, d / 2]; D_ = [-w / 2, 0, d / 2];
+      R1 = [0, h, -rise]; R2 = [0, h, rise];
+    } else {
+      A = [-w / 2, 0, -d / 2]; B = [-w / 2, 0, d / 2];
+      C = [w / 2, 0, d / 2]; D_ = [w / 2, 0, -d / 2];
+      R1 = [-rise, h, 0]; R2 = [rise, h, 0];
+    }
+    var tris = [
+      A, B, R1,
+      D_, C, R2,
+      A, D_, R2, A, R2, R1,
+      B, C, R2, B, R2, R1
+    ];
+    var pos = new Float32Array(tris.length * 3);
+    for (var i = 0; i < tris.length; i++) {
+      pos[i * 3] = tris[i][0]; pos[i * 3 + 1] = tris[i][1]; pos[i * 3 + 2] = tris[i][2];
+    }
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.computeVertexNormals();
+    return geo;
+  }
+
+  // ================= massing =================
+  var LW = 7.2, RW = 3.2, D = 7.2;
+  var F1 = 2.6, F2 = 2.45;
+  var wallH = F1 + F2;
+  var LX = -1.4;
+  var RX = LX + LW / 2 + RW / 2;
+  var minX = LX - LW / 2, maxX = RX + RW / 2;
+
+  addBox(LW, wallH, D, LX, wallH / 2, 0, LINE_STRUCT);
+  addBox(RW, wallH, D, RX, wallH / 2, 0, LINE_STRUCT);
+  addBox(LW + RW + 0.02, 0.01, D + 0.02, (LX + RX) / 2, F1, 0, LINE_SOFT, 0.55);
+
+  // ---- water table (foundation molding, wraps the full perimeter) ----
+  addBox(LW + RW, 0.12, 0.12, (LX + RX) / 2, 0.18, D / 2, LINE_TRIM, 0.55);
+  addBox(LW + RW, 0.12, 0.12, (LX + RX) / 2, 0.18, -D / 2, LINE_TRIM, 0.55);
+  addBox(0.12, 0.12, D, minX, 0.18, 0, LINE_TRIM, 0.55);
+  addBox(0.12, 0.12, D, maxX, 0.18, 0, LINE_TRIM, 0.55);
+
+  // ---- corner pilasters with cap + base moldings ----
+  [minX, LX + LW / 2, maxX].forEach(function (x) {
+    [D / 2, -D / 2].forEach(function (z) {
+      addBox(0.1, wallH - 0.4, 0.1, x, wallH / 2, z, LINE_TRIM, 0.5);
+      addBox(0.18, 0.1, 0.18, x, wallH - 0.1, z, LINE_TRIM, 0.7);
+      addBox(0.16, 0.08, 0.16, x, 0.35, z, LINE_TRIM, 0.7);
+    });
+  });
+
+  // ---- layered box cornice (fascia + crown strip) along every eave ----
+  function cornice(len, x, y, z, axis) {
+    var fw = axis === 'x' ? [len, 0.1, 0.14] : [0.14, 0.1, len];
+    var cw = axis === 'x' ? [len + 0.1, 0.07, 0.09] : [0.09, 0.07, len + 0.1];
+    addBox(fw[0], fw[1], fw[2], x, y, z, LINE_TRIM, 0.65);
+    addBox(cw[0], cw[1], cw[2], x, y + 0.1, z, LINE_TRIM, 0.5);
+  }
+  cornice(LW + overhangSafe(), LX, wallH + 0.02, D / 2 + 0.07, 'x');
+  cornice(LW + overhangSafe(), LX, wallH + 0.02, -D / 2 - 0.07, 'x');
+  cornice(D, minX - 0.07, wallH + 0.02, 0, 'z');
+  cornice(D, RX + RW / 2 + 0.07, wallH + 0.02, 0, 'z');
+  function overhangSafe() { return 0.7; }
+
+  // ---- bracket cornice (decorative corbels under the eave, on top of the fascia) ----
+  function addBrackets(axis, fixed, from, to, y, count) {
+    for (var i = 0; i < count; i++) {
+      var t = count === 1 ? 0.5 : i / (count - 1);
+      var pos = from + t * (to - from);
+      if (axis === 'x') addBox(0.09, 0.19, 0.09, pos, y, fixed, LINE_TRIM, 0.75);
+      else addBox(0.09, 0.19, 0.09, fixed, y, pos, LINE_TRIM, 0.75);
+    }
+  }
+  addBrackets('z', LX - LW / 2 - 0.09, -D / 2 + 0.35, D / 2 - 0.35, wallH - 0.12, 13);
+  addBrackets('z', LX + LW / 2 + 0.09, -D / 2 + 0.35, D / 2 - 0.35, wallH - 0.12, 13);
+
+  // ---- gable roof over left volume ----
+  var roofH = 2.35;
+  var overhang = 0.35;
+  var gShape = new THREE.Shape();
+  gShape.moveTo(-LW / 2 - overhang, 0);
+  gShape.lineTo(LW / 2 + overhang, 0);
+  gShape.lineTo(0, roofH);
+  gShape.lineTo(-LW / 2 - overhang, 0);
+  var gDepth = D + overhang * 2;
+  var roofGeo = new THREE.ExtrudeGeometry(gShape, { depth: gDepth, bevelEnabled: false, curveSegments: 1 });
+  roofGeo.translate(LX, wallH, -gDepth / 2);
+  building.add(edgesFromGeometry(roofGeo, LINE_STRUCT));
+
+  // raking fascia along both gable slopes (front face only, for a finished pediment edge)
+  var frontZ = D / 2 + overhang;
+  addBeam([LX - LW / 2 - overhang, wallH, frontZ], [LX, wallH + roofH, frontZ], 0.09, LINE_TRIM, 0.7);
+  addBeam([LX + LW / 2 + overhang, wallH, frontZ], [LX, wallH + roofH, frontZ], 0.09, LINE_TRIM, 0.7);
+
+  // ridge cresting (cast-iron comb) + finial at the peak
+  var ridgeY = wallH + roofH;
+  for (var rc = 1; rc < 15; rc++) {
+    var rz = -gDepth / 2 + (gDepth / 15) * rc;
+    addBox(0.03, 0.16, 0.03, LX, ridgeY + 0.08, rz, LINE_TRIM, 0.55);
+  }
+  addBox(0.05, 0.05, gDepth, LX, ridgeY, 0, LINE_TRIM, 0.6);
+  addCone(0.14, 0.4, LX, ridgeY + 0.2, frontZ, LINE_TRIM, 0.8, 8);
+
+  // attic pediment: squared window centered in the front gable face (matches the current paint job's
+  // plain sash rather than the round vent seen in the older listing photos)
+  addWindow(0.62, 0.72, LX, wallH + roofH * 0.36, frontZ + 0.01, 'x', LINE_TRIM, 0.85);
+
+  // small round accent window, second floor, tucked under the eave left of center
+  addFan(0.26, Math.PI * 2, LX - 1.9, wallH - 0.55, D / 2 + 0.02, LINE_TRIM, 0.8);
+  addFan(0.32, Math.PI * 2, LX - 1.9, wallH - 0.55, D / 2 + 0.04, LINE_SOFT, 0.4);
+
+  // brick chimney — sits on and penetrates the right roof slope, rising above the ridge
+  // (stylistic placement, not measured from the reference photo)
+  var chimX = LX + 1.9, chimZ = -1.3;
+  var chimHalfSpan = LW / 2 + overhang;
+  var chimRoofY = wallH + roofH * (1 - Math.abs(chimX - LX) / chimHalfSpan);
+  var chimBaseY = chimRoofY - 0.25;
+  var chimW = 0.55, chimD = 0.45, chimH = 1.55;
+  addBox(chimW, chimH, chimD, chimX, chimBaseY + chimH / 2, chimZ, LINE_STRUCT, 0.85);
+  addBox(chimW + 0.16, 0.1, chimD + 0.16, chimX, chimBaseY + chimH + 0.05, chimZ, LINE_STRUCT, 0.7);
+  addBox(0.16, 0.14, 0.16, chimX - 0.13, chimBaseY + chimH + 0.17, chimZ, LINE_STRUCT, 0.6);
+  addBox(0.16, 0.14, 0.16, chimX + 0.13, chimBaseY + chimH + 0.17, chimZ, LINE_STRUCT, 0.6);
+
+  // ---- hip roof over right volume (tower/wing) ----
+  var towerRise = 2.0;
+  var hipGeo = makeHipRoofGeometry(RW + overhang * 2, D + overhang * 2, towerRise);
+  hipGeo.translate(RX, wallH, 0);
+  building.add(edgesFromGeometry(hipGeo, LINE_STRUCT));
+  addBrackets('x', D / 2 + 0.02, RX - RW / 2 - 0.3, RX + RW / 2 + 0.3, wallH - 0.12, 8);
+  addBrackets('x', -D / 2 - 0.02, RX - RW / 2 - 0.3, RX + RW / 2 + 0.3, wallH - 0.12, 8);
+  addBrackets('z', RX - RW / 2 - 0.09, -D / 2 + 0.35, D / 2 - 0.35, wallH - 0.12, 12);
+  addBrackets('z', RX + RW / 2 + 0.09, -D / 2 + 0.35, D / 2 - 0.35, wallH - 0.12, 12);
+  addCone(0.12, 0.35, RX, wallH + towerRise + 0.17, 0, LINE_TRIM, 0.8, 8);
+
+  // ================= ground floor: portico + door + arched window =================
+  var doorX = LX + 1.5;
+  var porchW = 1.6, porchD = 0.9, porchWallH = 1.85, porchRoofH = 0.45;
+  var pShape = new THREE.Shape();
+  pShape.moveTo(-porchW / 2 - 0.15, 0);
+  pShape.lineTo(porchW / 2 + 0.15, 0);
+  pShape.lineTo(0, porchRoofH);
+  pShape.lineTo(-porchW / 2 - 0.15, 0);
+  var pDepth = porchD + 0.3;
+  var pRoofGeo = new THREE.ExtrudeGeometry(pShape, { depth: pDepth, bevelEnabled: false, curveSegments: 1 });
+  // shape already spans X (matching the two columns) and extrudes along Z (the ridge, running
+  // from the wall out past the columns) — no rotation needed, that was pulling the pediment
+  // sideways off the columns. Center the extrude on the portico's actual depth instead.
+  pRoofGeo.translate(doorX, porchWallH, D / 2 - 0.15);
+  building.add(edgesFromGeometry(pRoofGeo, LINE_TRIM, 0.85));
+  addCyl(0.075, porchWallH, doorX - porchW / 2, porchWallH / 2, D / 2 + porchD, LINE_TRIM, 0.85);
+  addCyl(0.075, porchWallH, doorX + porchW / 2, porchWallH / 2, D / 2 + porchD, LINE_TRIM, 0.85);
+  addBox(0.2, 0.08, 0.2, doorX - porchW / 2, 0.04, D / 2 + porchD, LINE_TRIM, 0.6);
+  addBox(0.2, 0.08, 0.2, doorX + porchW / 2, 0.04, D / 2 + porchD, LINE_TRIM, 0.6);
+  addBox(porchW + 0.3, 0.06, porchD + 0.3, doorX, 0.03, D / 2 + porchD / 2 + 0.1, LINE_SOFT, 0.5);
+
+  // entablature band spanning both columns, under the pediment — carries the JOJX wordmark
+  var entabH = 0.22;
+  var entabZCenter = (D / 2 - 0.15) + pDepth / 2;
+  addBox(porchW + 0.5, entabH, pDepth, doorX, porchWallH + entabH / 2, entabZCenter, LINE_TRIM, 0.8);
+  addBox(porchW + 0.4, 0.03, pDepth - 0.1, doorX, porchWallH + 0.02, entabZCenter, LINE_TRIM, 0.5);
+  // dentil molding along the entablature's lower front edge
+  var entabFrontZ = entabZCenter + pDepth / 2 - 0.02;
+  for (var dt = 0; dt < 9; dt++) {
+    var dtx = doorX - (porchW + 0.3) / 2 + (dt / 8) * (porchW + 0.3);
+    addBox(0.06, 0.05, 0.06, dtx, porchWallH - 0.03, entabFrontZ, LINE_TRIM, 0.6);
+  }
+
+  // JOJX wordmark, applied to the front face of the entablature
+  function letterStroke(w, h, t, x, y, z) { addBox(w, h, t, x, y, z, LINE_TRIM, 0.9); }
+  function drawLetter(ch, cx, cy, z, lw, lh, t) {
+    if (ch === 'O') {
+      letterStroke(lw, t, t, cx + lw / 2, cy + lh - t / 2, z);
+      letterStroke(lw, t, t, cx + lw / 2, cy + t / 2, z);
+      letterStroke(t, lh, t, cx + t / 2, cy + lh / 2, z);
+      letterStroke(t, lh, t, cx + lw - t / 2, cy + lh / 2, z);
+    } else if (ch === 'J') {
+      letterStroke(t, lh * 0.82, t, cx + lw - t / 2, cy + lh - (lh * 0.82) / 2, z);
+      letterStroke(lw * 0.75, t, t, cx + lw * 0.28, cy + t / 2, z);
+      letterStroke(t, lh * 0.28, t, cx + lw * 0.06, cy + lh * 0.14, z);
+    } else if (ch === 'X') {
+      addBeam([cx, cy, z], [cx + lw, cy + lh, z], t, LINE_TRIM, 0.9);
+      addBeam([cx, cy + lh, z], [cx + lw, cy, z], t, LINE_TRIM, 0.9);
+    }
+  }
+  function drawWord(word, centerX, cy, z) {
+    var lw = 0.15, lh = 0.16, gap = 0.07, stroke = 0.028;
+    var totalW = word.length * lw + (word.length - 1) * gap;
+    var x = centerX - totalW / 2;
+    for (var wi = 0; wi < word.length; wi++) {
+      drawLetter(word[wi], x, cy, z, lw, lh, stroke);
+      x += lw + gap;
+    }
+  }
+  drawWord('JOJX', doorX, porchWallH + (entabH - 0.16) / 2, entabFrontZ + 0.03);
+  // door + architrave surround + transom fanlight
+  addBox(0.85, 1.9, 0.06, doorX, 0.95, D / 2 + 0.03, LINE_TRIM, 0.8);
+  addBox(1.05, 2.3, 0.08, doorX, 1.15, D / 2 + 0.05, LINE_TRIM, 0.4);
+  addFan(0.44, Math.PI, doorX, 1.9, D / 2 + 0.03, LINE_TRIM, 0.75);
+
+  // full-height arched window, stage-left of the door — a real arch (radius = half the window
+  // width) rather than a small decorative fanlight, matching the reference photo
+  var archX = doorX - 2.0;
+  addArchWindow(1.05, 1.25, archX, 0.18, D / 2 + 0.02, 'x', LINE_SOFT, 0.75);
+
+  // small gabled window hood at second floor, echoing the entry pediment below it — sits just
+  // right of the balcony, directly above the door (stylistic proportions, not measured)
+  var orielX = doorX + 0.05, orielW = 1.0, orielStraightH = 0.95, orielYBottom = F1 + 0.6;
+  var orielTop = addArchWindow(orielW, orielStraightH, orielX, orielYBottom, D / 2 + 0.02, 'x', LINE_SOFT, 0.8);
+  var oRoofH = 0.38, oProj = 0.3, oHoodBase = orielTop + 0.1;
+  var oShape = new THREE.Shape();
+  oShape.moveTo(-orielW / 2 - 0.18, 0);
+  oShape.lineTo(orielW / 2 + 0.18, 0);
+  oShape.lineTo(0, oRoofH);
+  oShape.lineTo(-orielW / 2 - 0.18, 0);
+  var oDepth = oProj + 0.25;
+  var oRoofGeo = new THREE.ExtrudeGeometry(oShape, { depth: oDepth, bevelEnabled: false, curveSegments: 1 });
+  oRoofGeo.translate(orielX, oHoodBase, D / 2 - 0.12);
+  building.add(edgesFromGeometry(oRoofGeo, LINE_TRIM, 0.85));
+  addBeam([orielX - orielW / 2 - 0.08, oHoodBase - 0.2, D / 2], [orielX - orielW / 2 - 0.16, oHoodBase + 0.05, D / 2 + oProj], 0.04, LINE_TRIM, 0.6);
+  addBeam([orielX + orielW / 2 + 0.08, oHoodBase - 0.2, D / 2], [orielX + orielW / 2 + 0.16, oHoodBase + 0.05, D / 2 + oProj], 0.04, LINE_TRIM, 0.6);
+
+  // ================= second floor: projecting balcony =================
+  // narrower than before and shifted left, so it reads as its own element and clears the
+  // gabled window hood over the door (see below) instead of running the full facade width
+  var balCenterX = LX - 1.1;
+  var balW = 3.6;
+  var balProj = 1.25;               // how far the deck projects beyond the front wall
+  var wallZ = D / 2;
+  var outerZ = wallZ + balProj;
+  var railH = 1.15;
+  var floorY = F1;
+
+  // cantilevered deck slab
+  addBox(balW + 0.3, 0.12, balProj + 0.15, balCenterX, floorY - 0.02, wallZ + balProj / 2 - 0.05, LINE_STRUCT, 0.85);
+  addBox(balW + 0.36, 0.02, balProj + 0.2, balCenterX, floorY + 0.05, wallZ + balProj / 2 - 0.06, LINE_SOFT, 0.4);
+
+  // corbel brackets carrying the deck out from the wall
+  var corbelXs = [balCenterX - balW / 2 + 0.15, balCenterX - balW / 4, balCenterX, balCenterX + balW / 4, balCenterX + balW / 2 - 0.15];
+  corbelXs.forEach(function (x) {
+    addBeam([x, F1 - 0.4, wallZ], [x, floorY - 0.03, outerZ - 0.15], 0.07, LINE_TRIM, 0.7);
+    addBeam([x, F1 - 0.4, wallZ], [x, F1 - 0.4, outerZ - 0.15], 0.05, LINE_TRIM, 0.5);
+  });
+
+  // outer balustrade (flat-top rail, square balusters) at the projected edge
+  addBox(balW, 0.05, 0.03, balCenterX, floorY + railH, outerZ, LINE_TRIM, 0.85);
+  addBox(balW, 0.05, 0.03, balCenterX, floorY + 0.1, outerZ, LINE_TRIM, 0.6);
+  var balCount = 16;
+  for (var bi = 0; bi < balCount; bi++) {
+    var bt = bi / (balCount - 1);
+    var bx = balCenterX - balW / 2 + bt * balW;
+    addBox(0.045, railH - 0.12, 0.045, bx, floorY + 0.12 + (railH - 0.12) / 2, outerZ, LINE_TRIM, 0.5);
+  }
+  // short return rails closing the sides of the balcony (wall to outer edge)
+  [balCenterX - balW / 2, balCenterX + balW / 2].forEach(function (x) {
+    addBox(0.03, 0.05, balProj, x, floorY + railH, (wallZ + outerZ) / 2, LINE_TRIM, 0.7);
+    addBox(0.03, 0.05, balProj, x, floorY + 0.1, (wallZ + outerZ) / 2, LINE_TRIM, 0.55);
+    for (var si = 1; si < 5; si++) {
+      var sz = wallZ + (balProj / 5) * si;
+      addBox(0.04, railH - 0.12, 0.04, x, floorY + 0.12 + (railH - 0.12) / 2, sz, LINE_TRIM, 0.45);
+    }
+  });
+
+  // posts rising from the deck to the canopy roof above
+  var postXs = [balCenterX - balW / 2, balCenterX - balW / 6, balCenterX + balW / 6, balCenterX + balW / 2];
+  // half the pillar height that actually reads as "pillar" — the run from the top of the
+  // balustrade up to the canopy roof (the portion below that is behind the rail anyway)
+  var railTopY = floorY + railH;
+  var canopyY = railTopY;  // posts now stop level with the top of the railing, no taller
+  postXs.forEach(function (x) {
+    addBox(0.16, canopyY - floorY, 0.16, x, (canopyY + floorY) / 2, outerZ, LINE_TRIM, 0.85);
+    addBox(0.24, 0.06, 0.24, x, canopyY - 0.03, outerZ, LINE_TRIM, 0.6);
+  });
+
+  // canopy roof sheltering the balcony, with its own fascia
+  addBox(balW + 0.55, 0.1, balProj + 0.45, balCenterX, canopyY, wallZ + balProj / 2, LINE_STRUCT, 0.85);
+  cornice(balW + 0.5, balCenterX, canopyY - 0.06, outerZ + 0.2, 'x');
+
+  // recessed windows on the wall behind the balcony
+  addWindow(0.85, 1.65, balCenterX - balW / 4, F1 + F2 / 2, wallZ + 0.02, 'x', LINE_SOFT, 0.65);
+  addWindow(0.85, 1.65, balCenterX + balW / 4, F1 + F2 / 2, wallZ + 0.02, 'x', LINE_SOFT, 0.65);
+
+  // ================= tower windows (both floors, grouped pair, front + side, arched tops) =================
+  function towerWindowPair(yBottom, straightH, faceZ, faceX, axis) {
+    var ww = 0.58, gap = 0.18;
+    [-1, 1].forEach(function (s) {
+      var off = s * (ww / 2 + gap / 2);
+      if (axis === 'x') addArchWindow(ww, straightH, RX + off, yBottom, faceZ, 'x', LINE_SOFT, 0.75);
+      else addArchWindow(ww, straightH, faceX, yBottom, faceZ + off, 'z', LINE_SOFT, 0.75);
+    });
+  }
+  towerWindowPair(F1 + 0.35, 1.15, D / 2 + 0.02, null, 'x');
+  towerWindowPair(0.35, 1.15, D / 2 + 0.02, null, 'x');
+  towerWindowPair(F1 + 0.35, 1.15, null, RX + RW / 2 + 0.02, 'z');
+  towerWindowPair(0.35, 1.15, null, RX + RW / 2 + 0.02, 'z');
+
+  // ================= side + rear windows =================
+  function sideWindows(count, y, wh, faceX) {
+    var margin = D * 0.12, usable = D - margin * 2;
+    for (var i = 0; i < count; i++) {
+      var t = count === 1 ? 0.5 : i / (count - 1);
+      var z = -usable / 2 + t * usable;
+      addWindow(0.55, wh, faceX, y, z, 'z', LINE_SOFT, 0.65);
+    }
+  }
+  sideWindows(3, F1 + F2 / 2, 1.4, minX - 0.02);
+  sideWindows(3, F2 / 2, 1.3, minX - 0.02);
+
+  [LX - 1.6, LX + 0.6].forEach(function (x) {
+    addWindow(0.8, 1.4, x, F1 + F2 / 2, -D / 2 - 0.02, 'x', LINE_SOFT, 0.55);
+    addWindow(0.8, 1.4, x, F2 / 2, -D / 2 - 0.02, 'x', LINE_SOFT, 0.55);
+  });
+
+  // ---- ground plane grid for context ----
+  var grid = new THREE.GridHelper(56, 48, 0x0f766e, 0x0a2a28);
+  grid.position.y = 0;
+  grid.material.transparent = true;
+  grid.material.opacity = 0.3;
+  scene.add(grid);
+
+  building.position.x = -1;
+  building.position.z = 0.6;
+
+  var autoRotate = true;
+  renderer.domElement.addEventListener('pointerdown', function () { autoRotate = false; });
+
+  function onResize() {
+    camera.aspect = wrap.clientWidth / wrap.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  }
+  window.addEventListener('resize', onResize);
+
+  function animate() {
+    requestAnimationFrame(animate);
+    if (autoRotate) building.rotation.y += 0.0022;
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+})();
+</script>
+</body>
+</html>
